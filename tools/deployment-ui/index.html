@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="smart-mic-session" content="__SESSION_TOKEN__">
+<title>Smart Mic 部署</title>
+<link rel="stylesheet" href="/style.css">
+<script defer src="/app.js"></script>
+</head>
+<body>
+<header><strong>Smart Mic</strong><span>部署向导</span><button id="close" type="button">退出向导</button></header>
+<main>
+<nav aria-label="部署进度"><ol id="steps"></ol></nav>
+<section aria-labelledby="title">
+<h1 id="title" tabindex="-1"></h1>
+<div id="instructions"></div>
+<form id="form">
+<div id="fields"></div>
+<p id="status" role="status" aria-live="polite"></p>
+<button id="action" type="submit"></button>
+</form>
+</section>
+</main>
+</body>
+</html>

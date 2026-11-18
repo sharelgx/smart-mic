@@ -1,5 +1,8 @@
 """Interactive macOS install, USB pairing, and per-user launch agents."""
 import hashlib
+import json
+import asyncio
+from contextlib import redirect_stdout
 import os
 from pathlib import Path
 import plistlib
@@ -44,10 +47,10 @@ def flash(port):
     table = (bundle / 'partition-table.bin').read_bytes()
     with tempfile.TemporaryDirectory() as temp:
         actual = Path(temp) / 'partition.bin'
-        subprocess.run(esp + ['read-flash', '0x8000', str(len(table)), str(actual)], check=True)
+        subprocess.run(esp + ['read-flash', '0x8000', str(len(table)), str(actual)], check=True, stdout=sys.stderr)
         if actual.read_bytes() != table:
             raise RuntimeError('分区表不匹配，已停止烧录。')
-    subprocess.run(esp + ['write-flash', '0x10000', str(bundle / 'smart-mic.bin')], check=True)
+    subprocess.run(esp + ['write-flash', '0x10000', str(bundle / 'smart-mic.bin')], check=True, stdout=sys.stderr)
 
 
 def install_jobs():
@@ -70,7 +73,7 @@ def install_jobs():
         subprocess.run(['/bin/launchctl', 'bootstrap', DOMAIN, str(path)], check=True)
 
 
-def main():
+def check_mac():
     if sys.platform != 'darwin':
         raise RuntimeError('本部署程序需要 macOS。')
     if not APP.is_dir() or not VOICE_BINARY.is_file():
@@ -81,32 +84,103 @@ def main():
     for legacy in ('local.esp32.sogou-microphone', 'local.esp32.codex-shared-desktop'):
         if (AGENTS / f'{legacy}.plist').exists():
             raise RuntimeError('检测到旧版登录启动项。请先停用旧版，避免两个音频桥同时运行。')
+    verify_bundle()
+    lan_address()
+
+
+def usb_port():
+    ports = [item.device for item in comports() if (item.vid, item.pid) == (0x303a, 0x1001)]
+    if len(ports) != 1:
+        raise RuntimeError('请用 USB 数据线只连接一台 AI Passport，再重新检测。')
+    return ports[0]
+
+
+def device_status():
+    saved = load_settings(SETTINGS)
+    host = lan_address()
+    if saved and (saved['host'], saved['port']) == (host, PORT):
+        return 'paired'
+    usb_port()
+    return 'update' if saved else 'new'
+
+
+def pair(data):
     host = lan_address()
     saved = load_settings(SETTINGS)
-    if not saved or (saved['host'], saved['port']) != (host, PORT):
-        ports = [item.device for item in comports() if (item.vid, item.pid) == (0x303a, 0x1001)]
-        if len(ports) != 1:
-            raise RuntimeError('请用 USB 数据线连接一台 AI Passport。')
-        port = ports[0]
-        if saved:
-            key = bytes.fromhex(saved['key'])
-            update_host(port, host, PORT)
-        else:
-            choice = input('确认连接的是 FoloToy AI Passport ESP32-C3 8MB。输入 flash 覆盖应用固件，输入 pair 配对已刷 Smart Mic 的设备：').strip()
-            if choice == 'flash':
-                flash(port)
-            elif choice != 'pair':
-                raise RuntimeError('已取消设备设置。')
-            key = secrets.token_bytes(32)
-            provision(port, host, PORT, key)
-        save_settings(SETTINGS, key, host, PORT)
-    install_jobs()
-    print('已安装登录启动项。若 Codex 已打开，按 ⌘Q 后等待自动重开。')
-    print('打开目标本地聊天，按 ⌘⌥L，再按设备第三键开始听写。')
+    if saved:
+        if (saved['host'], saved['port']) != (host, PORT):
+            update_host(usb_port(), host, PORT)
+        key = bytes.fromhex(saved['key'])
+    else:
+        ssid, password = data.get('ssid'), data.get('password')
+        if not isinstance(ssid, str) or not 1 <= len(ssid.encode()) <= 32:
+            raise ValueError('请输入 1 至 32 字节的 Wi-Fi 名称。')
+        if not isinstance(password, str) or len(password.encode()) > 63:
+            raise ValueError('Wi-Fi 密码长度无效。')
+        port = usb_port()
+        if data.get('flash') is True:
+            flash(port)
+            port = usb_port()
+        key = secrets.token_bytes(32)
+        provision(port, host, PORT, key, ssid=ssid, password=password)
+    save_settings(SETTINGS, key, host, PORT)
+
+
+def verify_services():
+    from codex_push import CodexPush, DEFAULT_SOCKET
+
+    if not DEFAULT_SOCKET.is_socket():
+        raise RuntimeError('共享接口正在等待 Codex 完全退出。请切回 Codex 按 ⌘Q，等应用自动重新打开后重试。')
+
+    async def check_socket():
+        client = CodexPush('', ROOT)
+        try:
+            await client.connect(verify=False)
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(check_socket())
+    except Exception as error:
+        raise RuntimeError('共享接口暂时无法连接。请等待 Codex 启动完成，再重新检测。') from error
+    connections = subprocess.run(
+        ['/usr/sbin/lsof', '-nP', f'-iTCP:{PORT}', '-sTCP:ESTABLISHED'],
+        capture_output=True, text=True, check=False)
+    status = subprocess.run(['/bin/launchctl', 'print', f'{DOMAIN}/local.smart-mic.audio'],
+                            capture_output=True, text=True, check=False)
+    pid = next((line.split('=')[-1].strip() for line in status.stdout.splitlines()
+                if line.strip().startswith('pid =')), None)
+    if not pid or not any(row.split()[1:2] == [pid] for row in connections.stdout.splitlines()):
+        raise RuntimeError('音频桥还没检测到设备连接。请确认设备开机，Mac 和设备处于同一局域网，再重试。')
 
 
 if __name__ == '__main__':
+    action = sys.argv[1]
+    data = json.load(sys.stdin)
     try:
-        main()
-    except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as error:
-        sys.exit(f'部署未完成：{error}')
+        with redirect_stdout(sys.stderr):
+            if action == 'mac':
+                check_mac()
+                result = None
+            elif action == 'device':
+                result = device_status()
+            elif action == 'pair':
+                check_mac()
+                pair(data)
+                result = None
+            elif action == 'install':
+                check_mac()
+                if device_status() != 'paired':
+                    raise RuntimeError('请先完成无线配对。')
+                install_jobs()
+                result = None
+            elif action == 'verify':
+                verify_services()
+                result = None
+            else:
+                raise ValueError('未知步骤。')
+        print(json.dumps({'ok': True, 'result': result}))
+    except subprocess.CalledProcessError:
+        print(json.dumps({'ok': False, 'error': '操作失败。请检查 USB 连接或登录启动权限后重试。'}))
+    except (RuntimeError, ValueError, OSError) as error:
+        print(json.dumps({'ok': False, 'error': str(error)}))

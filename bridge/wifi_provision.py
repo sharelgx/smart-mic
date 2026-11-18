@@ -4,10 +4,12 @@ import json
 import time
 
 
-def provision(port, host, listen_port, key):
+def provision(port, host, listen_port, key, *, ssid=None, password=None):
     import serial
-    ssid = input('2.4GHz Wi-Fi 名称：').strip()
-    password = getpass.getpass('Wi-Fi 密码（不显示，仅保存到设备）：')
+    if ssid is None:
+        ssid = input('2.4GHz Wi-Fi 名称：').strip()
+    if password is None:
+        password = getpass.getpass('Wi-Fi 密码（不显示，仅保存到设备）：')
     if not 1 <= len(ssid.encode()) <= 32 or len(password.encode()) > 63:
         raise ValueError('Wi-Fi 名称或密码长度不合法')
     config = {'ssid':ssid, 'password':password, 'host':host,
