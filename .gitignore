@@ -6,3 +6,6 @@ work/
 .venv/
 node_modules/
 __pycache__/
+firmware/ai-passport/managed_components/
+firmware/ai-passport/build/
+firmware/ai-passport/sdkconfig

@@ -4,13 +4,14 @@ import argparse
 import asyncio
 import fcntl
 import hashlib
+from chat_menu import ChatMenu, MENU_BINDING
 import json
 from pathlib import Path
 import subprocess
 import sys
 import time
 from virtual_mic import VirtualMicrophone,select_device
-from wifi_protocol import START,AUDIO,END,CANCEL,RESULT,READY,authenticate,receive,RATE
+from wifi_protocol import START,AUDIO,END,CANCEL,RESULT,READY,BIND,authenticate,receive,RATE
 from wifi_settings import load_settings,save_settings
 from wifi_network import lan_address
 from wifi_provision import provision,update_host
@@ -67,10 +68,11 @@ def run_binding_hint():
 
 
 class MicrophoneBridge:
-    def __init__(self,key,sink,start_voice=None,chat_factory=None):
+    def __init__(self,key,sink,start_voice=None,chat_factory=None,menu_factory=None):
         self.key=key; self.sink=sink; self.owner=None; self.writer=None
         self.start_voice=start_voice
         self.chat_factory=chat_factory
+        self.menu_factory=menu_factory
         self.handover=asyncio.Lock()
         self.binding_hint_task=None
 
@@ -84,14 +86,38 @@ class MicrophoneBridge:
                     self.writer.close(); old.cancel()
                     await asyncio.gather(old,return_exceptions=True)
                 self.owner=current; self.writer=writer
-            writer.write(down.encode(READY,b'virtual-mic')); await writer.drain()
+            menu = self.menu_factory() if self.menu_factory else None
+            writer.write(down.encode(READY,b'virtual-mic-menu' if menu else b'virtual-mic')); await writer.drain()
             print('设备已连接虚拟麦克风。按右侧最下面第三键唤起搜狗并开始收音。',flush=True)
             while True:
                 timeout=max(.01,65-(time.monotonic()-started)) if active else None
                 kind,payload=await receive(reader,up,timeout)
-                if kind==START:
-                    if active or json.loads(payload)!={'rate':RATE,'bits':16,'channels':1}: raise ValueError('invalid start')
+                if kind==BIND and not active and menu:
+                    try:
+                        if payload == b'open':
+                            await asyncio.wait_for(menu.refresh(), 18)
+                            result = menu.entry(0)
+                        elif len(payload)==2 and payload[0]==0:
+                            result = menu.entry(payload[1])
+                        elif len(payload)==2 and payload[0]==1:
+                            await asyncio.wait_for(menu.select(payload[1]), 18)
+                            result = b'bound'
+                        else:
+                            result = b'error'
+                    except (BindingError, RuntimeError, OSError):
+                        result = b'error'
+                    writer.write(down.encode(RESULT,result)); await writer.drain()
+                elif kind==START:
+                    audio_format = json.loads(payload)
+                    selected = audio_format.pop('selected', False) if isinstance(audio_format,dict) else False
+                    if active or audio_format!={'rate':RATE,'bits':16,'channels':1} or type(selected) is not bool:
+                        raise ValueError('invalid start')
                     session=self.chat_factory() if self.chat_factory else None
+                    if selected:
+                        if not session or not menu:
+                            raise BindingError('请启动 Codex 共享接口后重新选择聊天')
+                        session.use_clipboard = False
+                        session.binding_path = MENU_BINDING
                     if session:
                         live=LiveDictation(self.sink,session)
                     else:
@@ -161,7 +187,7 @@ async def run(args):
                 return SogouChat()
             print('共享聊天接口未开启，本次搜狗仅上屏。',flush=True)
             return None
-        bridge=MicrophoneBridge(key,sink,start_voice=start_voice,chat_factory=current_chat)
+        bridge=MicrophoneBridge(key,sink,start_voice=start_voice,chat_factory=current_chat,menu_factory=ChatMenu)
         async with await asyncio.start_server(bridge.handle,args.bind,args.port,limit=8192,backlog=2) as server:
             print(f'Wi-Fi 麦克风 {args.bind}:{args.port} → {args.device}，共享接口就绪后可按键发送。',flush=True)
             if not saved or args.configure:

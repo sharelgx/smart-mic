@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bridge'))
 from wifi_microphone import MicrophoneBridge
-from wifi_protocol import AUDIO, CANCEL, END, Frames, RATE, READY, RESULT, START, receive, session_keys
+from wifi_protocol import AUDIO, BIND, CANCEL, END, Frames, RATE, READY, RESULT, START, receive, session_keys
 
 
 class Sink:
@@ -86,3 +86,49 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lost_ack_is_not_retried(self):
         self.assertEqual(await self.capture('end', ack=False), ['测试本次听写'])
+
+
+    async def test_menu_selects_two_destinations(self):
+        key = b'x' * 32
+        sessions = [Session(), Session()]
+        selected = None
+
+        class Menu:
+            async def refresh(self):
+                pass
+
+            def entry(self, index):
+                return (b'1/2\nProject A', b'2/2\nProject B')[index]
+
+            async def select(self, index):
+                nonlocal selected
+                selected = sessions[index]
+
+        bridge = MicrophoneBridge(key, Sink(), chat_factory=lambda: selected, menu_factory=Menu)
+        server = await asyncio.start_server(bridge.handle, '127.0.0.1', 0)
+        async with server:
+            reader, writer = await asyncio.open_connection(*server.sockets[0].getsockname())
+            try:
+                challenge = await reader.readexactly(20)
+                nonce = b'y' * 16
+                writer.write(nonce + hmac.digest(key, challenge + nonce, 'sha256'))
+                up, down = [Frames(k) for k in session_keys(key, challenge[4:], nonce)]
+                self.assertEqual(await receive(reader, down, 2), (READY, b'virtual-mic-menu'))
+                pcm = b'\x01\0' * 320
+                for index in range(2):
+                    writer.write(up.encode(BIND, b'open'))
+                    self.assertEqual(await receive(reader, down, 2), (RESULT, b'1/2\nProject A'))
+                    writer.write(up.encode(BIND, bytes([0, index])))
+                    self.assertEqual(await receive(reader, down, 2), (RESULT, Menu().entry(index)))
+                    writer.write(up.encode(BIND, bytes([1, index])))
+                    self.assertEqual(await receive(reader, down, 2), (RESULT, b'bound'))
+                    writer.write(up.encode(START, b'{"rate":16000,"bits":16,"channels":1,"selected":true}'))
+                    writer.write(up.encode(AUDIO, pcm))
+                    end = {'bytes': len(pcm), 'sha256': hashlib.sha256(pcm).hexdigest()}
+                    writer.write(up.encode(END, json.dumps(end).encode()))
+                    self.assertEqual(await receive(reader, down, 2), (RESULT, b'sent'))
+                    self.assertEqual([len(session.sent) for session in sessions], [1, index])
+                    self.assertFalse(selected.use_clipboard)
+            finally:
+                writer.close()
+                await writer.wait_closed()

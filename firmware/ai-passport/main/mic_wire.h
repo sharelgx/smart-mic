@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include "mbedtls/gcm.h"
 
-enum { MIC_START=1, MIC_AUDIO, MIC_END, MIC_CANCEL, MIC_RESULT, MIC_READY };
+enum { MIC_START=1, MIC_AUDIO, MIC_END, MIC_CANCEL, MIC_RESULT, MIC_READY, MIC_BIND };
 typedef struct {
     int fd;
     uint64_t tx, rx;

@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class SogouChat:
     def __init__(self):
         self.client = CodexPush('', ROOT)
+        self.use_clipboard = True
+        self.binding_path = None
         self.pad = None
         self.voice_pids = None
         self.starting_voice = None
@@ -34,14 +36,17 @@ class SogouChat:
         from sogou_voice import start_session_voice
 
         try:
-            candidate = await asyncio.to_thread(copied_thread_id)
+            candidate = await asyncio.to_thread(copied_thread_id) if self.use_clipboard else None
         except BindingError as error:
             # An unreadable or unsupported new destination must not fall back to the old one.
-            invalidate_binding(path=BINDING_FILE)
+            invalidate_binding(path=self.binding_path or BINDING_FILE)
             print(str(error), flush=True)
             raise
         try:
-            target = await bind_target(self.client, candidate)
+            if self.use_clipboard:
+                target = await bind_target(self.client, candidate)
+            else:
+                target = await bind_target(self.client, candidate, path=self.binding_path)
         except BindingError as error:
             print(str(error), flush=True)
             raise
@@ -78,7 +83,7 @@ class SogouChat:
     async def send(self, text):
         self.stage = '等待当前聊天的发送回执'
         return await self.client.push(
-            text, before_submit=lambda: verify_bound_target(self.client, path=BINDING_FILE))
+            text, before_submit=lambda: verify_bound_target(self.client, path=self.binding_path or BINDING_FILE))
 
     async def close(self):
         try:

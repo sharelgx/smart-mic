@@ -59,6 +59,7 @@ static int port;
 static atomic_bool config_ready;
 static lv_obj_t *status_label,*detail_label,*battery_label,*time_label;
 static lv_obj_t *left_wave,*right_wave;
+static lv_obj_t *chat_panel,*chat_counter,*chat_title;
 static int wave_level = -1;  // -1 is idle; 0 is recording in silence.
 static const char *TAG="wifi_mic";
 static atomic_uint capture_started;
@@ -160,8 +161,35 @@ static void screen_init(void) {
     lv_obj_set_style_text_align(time_label,LV_TEXT_ALIGN_CENTER,0);
     detail_label=label(scr,"请用 USB 线连接电脑",18,272,204,0xACBBB1);
     lv_obj_set_style_text_align(detail_label,LV_TEXT_ALIGN_CENTER,0);
+    chat_panel=lv_obj_create(scr);
+    lv_obj_set_size(chat_panel,240,320);
+    lv_obj_set_pos(chat_panel,0,0);
+    lv_obj_set_style_bg_color(chat_panel,lv_color_hex(BG),0);
+    lv_obj_set_style_border_width(chat_panel,0,0);
+    lv_obj_set_style_pad_all(chat_panel,0,0);
+    lv_obj_remove_flag(chat_panel,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(chat_panel,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *heading=label(chat_panel,"Chats",18,25,204,GREEN);
+    chat_counter=label(chat_panel,"",18,68,204,0xACBBB1);
+    chat_title=label(chat_panel,"",18,105,204,0xF0F7F2);
+    lv_obj_t *hint=label(chat_panel,"UP / DOWN  Browse\nOK  Select",18,248,204,0xACBBB1);
+    lv_obj_set_style_text_font(heading,&lv_font_montserrat_14,0);
+    lv_obj_set_style_text_font(chat_counter,&lv_font_montserrat_14,0);
+    lv_obj_set_style_text_font(chat_title,&lv_font_montserrat_14,0);
+    lv_obj_set_style_text_font(hint,&lv_font_montserrat_14,0);
     lv_screen_load(scr);
 }
+static void chat_screen(const char *counter,const char *title) {
+    if(!bsp_lvgl_lock(100)) return;
+    if(!counter) lv_obj_add_flag(chat_panel,LV_OBJ_FLAG_HIDDEN);
+    else {
+        lv_label_set_text(chat_counter,counter);
+        lv_label_set_text(chat_title,title);
+        lv_obj_remove_flag(chat_panel,LV_OBJ_FLAG_HIDDEN);
+    }
+    bsp_lvgl_unlock();
+}
+
 static void key_callback(bsp_btn_t button,bsp_btn_ev_t event,void *user) {
     (void)user;
     atomic_fetch_add(&key_events,1);
@@ -411,6 +439,9 @@ static void network_task(void *arg) {
         mic_wire_t wire; uint8_t kind; char result[128]={0};
         bool ready=false;
         if(mic_wire_open(&wire,fd,pair_key)==0 && mic_wire_read(&wire,&kind,result,sizeof(result)-1)>=0 && kind==MIC_READY) ready=true;
+        bool menu_supported=ready && !strcmp(result,"virtual-mic-menu");
+        bool menu_open=false, selected=false;
+        unsigned index=0, count=0;
         if(ready) {
             atomic_store(&connected,true);
             screen_status("就绪","按最下方第三键开始说话");
@@ -421,7 +452,46 @@ static void network_task(void *arg) {
             atomic_fetch_add(&network_loops,1);
             key_event_t key;
             if(xQueueReceive(keys,&key,pdMS_TO_TICKS(in_record?1:20))==pdTRUE) {
-                if(key.button==BSP_BTN_OK && !in_record) {
+                if(!in_record && menu_supported && (menu_open || key.button==BSP_BTN_UP || (!selected && key.button==BSP_BTN_OK))) {
+                    uint8_t request[2];
+                    const void *payload="open";
+                    size_t size=4;
+                    bool select=menu_open && key.button==BSP_BTN_OK && count;
+                    if(menu_open && count) {
+                        if(!select) index=(index+count+(key.button==BSP_BTN_DOWN?1:count-1))%count;
+                        request[0]=select?1:0; request[1]=(uint8_t)index;
+                        payload=request; size=sizeof(request);
+                    } else if(menu_open && key.button==BSP_BTN_OK) {
+                        menu_open=false;
+                        chat_screen(NULL,NULL);
+                        continue;
+                    }
+                    if(mic_wire_send(&wire,MIC_BIND,payload,size)) break;
+                    struct timeval menu_timeout={.tv_sec=25};
+                    setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&menu_timeout,sizeof(menu_timeout));
+                    int n=mic_wire_read(&wire,&kind,result,sizeof(result)-1);
+                    if(n<0 || kind!=MIC_RESULT) break;
+                    result[n]='\0';
+                    xQueueReset(keys);
+                    if(select && !strcmp(result,"bound")) {
+                        menu_open=false; selected=true;
+                        chat_screen(NULL,NULL);
+                        screen_status("就绪","按第三键开始说话");
+                    } else {
+                        menu_open=true;
+                        char *name=strchr(result,'\n');
+                        unsigned position=0;
+                        if(name && sscanf(result,"%u/%u",&position,&count)==2 &&
+                           position>0 && position<=count && count<=12) {
+                            *name='\0'; index=position-1;
+                            chat_screen(result,name+1);
+                        } else {
+                            count=0;
+                            chat_screen("UP  Retry / OK  Exit",
+                                        !strcmp(result,"empty")?"Open a Codex chat first.":"Could not read chats.");
+                        }
+                    }
+                } else if(key.button==BSP_BTN_OK && !in_record) {
                     xQueueReset(audio_queue); atomic_store(&capture_failed,false);
                     atomic_store(&cancel_recording,false); atomic_store(&capture_done,false);
                     atomic_store(&capturing,true); in_record=true; atomic_store(&capture_started,xTaskGetTickCount());
@@ -434,7 +504,11 @@ static void network_task(void *arg) {
             }
             audio_frame_t frame;
             if(in_record && xQueueReceive(audio_queue,&frame,pdMS_TO_TICKS(5))==pdTRUE) {
-                if(atomic_load(&capture_failed) || mic_wire_send(&wire,frame.kind,frame.data,frame.size)) break;
+                const char *selected_format="{\"rate\":16000,\"bits\":16,\"channels\":1,\"selected\":true}";
+                bool use_selection=selected && frame.kind==MIC_START;
+                const void *payload=use_selection?(const void *)selected_format:frame.data;
+                size_t size=use_selection?strlen(selected_format):frame.size;
+                if(atomic_load(&capture_failed) || mic_wire_send(&wire,frame.kind,payload,size)) break;
                 if(frame.kind==MIC_END || frame.kind==MIC_CANCEL) {
                     screen_status("正在处理","请稍候");
                     struct timeval timeout={.tv_sec=120}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
@@ -458,6 +532,7 @@ static void network_task(void *arg) {
         atomic_store(&connected,false); atomic_store(&cancel_recording,true); atomic_store(&capturing,false);
         while(in_record && !atomic_load(&capture_done)) vTaskDelay(pdMS_TO_TICKS(20));
         shutdown(fd,SHUT_RDWR); close(fd); mic_wire_free(&wire);
+        chat_screen(NULL,NULL);
         screen_status("连接已断开","正在重新连接");
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
