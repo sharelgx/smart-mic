@@ -1,0 +1,8 @@
+cryptography==50.0.2
+esptool==5.1.0
+numpy>=1.26,<3
+OpenCC==1.1.9
+pyobjc-framework-Cocoa==13.0
+pyserial==3.5
+sounddevice==0.5.3
+websockets==15.0.1

@@ -1,0 +1,3 @@
+#!/bin/zsh
+TASK_PROXY_ROOT="${0:A:h:h}"
+exec "$TASK_PROXY_ROOT/.venv/bin/python" "$TASK_PROXY_ROOT/tools/desktop_socket_proxy.py" "$@"
