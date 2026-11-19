@@ -18,3 +18,9 @@ int bsp_battery_soc(void);
 
 // 电池电压 mV;读失败返回 -1。
 int bsp_battery_mv(void);
+
+// Probe without writes. Wake only changes the gauge mode, retaining its profile.
+esp_err_t bsp_battery_probe(void);
+esp_err_t bsp_battery_wake_existing(void);
+int bsp_battery_existing_soc(void);
+void bsp_battery_report(void);

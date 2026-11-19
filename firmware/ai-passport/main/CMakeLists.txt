@@ -4,3 +4,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES bsp esp_event esp_netif esp_timer esp_wifi nvs_flash json mbedtls esp_driver_usb_serial_jtag
 )
+
+if(SMART_MIC_YOUTELI_BATTERY)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SMART_MIC_YOUTELI_BATTERY)
+endif()

@@ -1,4 +1,6 @@
 // components/bsp/src/bsp_battery.c
+#include <stdio.h>
+
 // CW2017 电量计驱动。
 #include "bsp_battery.h"
 #include "bsp_i2c.h"
@@ -23,6 +25,23 @@ static const char *TAG = "bsp_batt";
 #define CW_UPDATE_FLAG    0x80
 #define CW_PROFILE_SIZE   80
 
+#ifdef SMART_MIC_YOUTELI_BATTERY
+// FoloToy 1.2.2 recovery image profile, also in upstream 1178e40.
+#define BATTERY_PROFILE_NAME "Youteli 500mAh"
+static const uint8_t s_battery_profile[] = {
+    0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xAD, 0xC7, 0xC8, 0xCA, 0xBD, 0xB1, 0xC1, 0x94,
+    0x88, 0xD1, 0xBD, 0x97, 0x88, 0x66, 0x56, 0x4A,
+    0x3F, 0x33, 0x26, 0x5C, 0x37, 0xD1, 0x27, 0xD8,
+    0xCC, 0xB7, 0xCF, 0xB3, 0xB2, 0xAE, 0xA6, 0x9E,
+    0x99, 0x97, 0x9B, 0x86, 0x47, 0x1E, 0x17, 0x26,
+    0x49, 0x96, 0xD9, 0xE1, 0xDD, 0xDC, 0xD4, 0x59,
+    0x00, 0x00, 0x90, 0x02, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5C,
+};
+#else
+#define BATTERY_PROFILE_NAME "Wanli 500mAh profile2 XIL40X"
 // Wanli New Energy 500 mAh, profile2 / XIL40X / 2026-10-20.
 // Exact vendor bytes: assets/battery/wanli-500mah-profile2-xil40x-20261020.txt.
 // Infer the array length so the assertion also catches missing initializer bytes.
@@ -38,6 +57,8 @@ static const uint8_t s_battery_profile[] = {
     0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xB7,
 };
+
+#endif
 
 _Static_assert(sizeof(s_battery_profile) == CW_PROFILE_SIZE,
                "CW2017 battery profile must contain exactly 80 bytes");
@@ -75,12 +96,14 @@ static int cw_enter_active(void) {
 }
 
 // 同时检查 UPDATE_FLAG 和 80 字节内容，避免只凭标志误用旧电芯参数。
-static int cw_profile_matches(bool *matches) {
+static int cw_profile_matches(bool *matches, bool require_update_flag) {
     uint8_t val = 0;
     *matches = false;
 
-    if (cw_read(CW_REG_SOC_ALERT, &val, 1) != 0) return -1;
-    if ((val & CW_UPDATE_FLAG) == 0) return 0;
+    if (require_update_flag) {
+        if (cw_read(CW_REG_SOC_ALERT, &val, 1) != 0) return -1;
+        if ((val & CW_UPDATE_FLAG) == 0) return 0;
+    }
 
     for (size_t i = 0; i < CW_PROFILE_SIZE; i++) {
         if (cw_read((uint8_t)(CW_REG_PROFILE + i), &val, 1) != 0) return -1;
@@ -132,13 +155,9 @@ static int cw_wait_soc_ready(void) {
     return -1;
 }
 
-esp_err_t bsp_battery_init(void) {
-    if (s_ready) return ESP_OK;
-
-    // 一次性探测(总线/句柄/VERSION/profile)只在无句柄时执行;软降级后的
-    // 重试直接进入 profile 校验与就绪等待。
-    esp_err_t e = ESP_OK;
-    if (!s_dev) {
+esp_err_t bsp_battery_probe(void) {
+    if (s_dev) return ESP_OK;
+    esp_err_t e;
     e = bsp_i2c_init();
     if (e != ESP_OK) return e;
 
@@ -159,17 +178,41 @@ esp_err_t bsp_battery_init(void) {
         return ESP_ERR_NOT_FOUND;
     }
     ESP_LOGI(TAG, "检测到 CW2017 VERSION=0x%02X", ver);
-    }  // !s_dev 探测段结束
+    return ESP_OK;
+}
+
+esp_err_t bsp_battery_wake_existing(void) {
+    esp_err_t err = bsp_battery_probe();
+    if (err != ESP_OK) return err;
+    uint8_t config;
+    err = cw_read(CW_REG_CONFIG, &config, 1);
+    if (err != ESP_OK) return err;
+    if ((config & 0xF0) == CW_CONFIG_ACTIVE) return ESP_OK;
+    return cw_write(CW_REG_CONFIG, CW_CONFIG_ACTIVE);
+}
+
+int bsp_battery_existing_soc(void) {
+    uint8_t config;
+    if (cw_read(CW_REG_CONFIG, &config, 1) != ESP_OK ||
+        (config & 0xF0) != CW_CONFIG_ACTIVE ||
+        bsp_battery_mv() < CW_MV_MIN_PLAUSIBLE) return -1;
+    return bsp_battery_soc();
+}
+
+esp_err_t bsp_battery_init(void) {
+    if (s_ready) return ESP_OK;
+    esp_err_t e = bsp_battery_probe();
+    if (e != ESP_OK) return e;
 
     bool profile_matches = false;
-    if (cw_profile_matches(&profile_matches) != 0) {
+    if (cw_profile_matches(&profile_matches, true) != 0) {
         ESP_LOGE(TAG, "读取电池 profile 失败");
         e = ESP_FAIL;
         goto fail;
     }
 
     if (!profile_matches) {
-        ESP_LOGI(TAG, "写入万锂新能源 500mAh profile2 XIL40X 20261020");
+        ESP_LOGI(TAG, "写入 " BATTERY_PROFILE_NAME);
         if (cw_update_profile() != 0) {
             ESP_LOGE(TAG, "自定义 profile 写入失败");
             e = ESP_FAIL;
@@ -185,7 +228,7 @@ esp_err_t bsp_battery_init(void) {
             e = ESP_FAIL;
             goto fail;
         }
-        ESP_LOGI(TAG, "万锂新能源 500mAh profile2 XIL40X 20261020 已匹配");
+        ESP_LOGI(TAG, BATTERY_PROFILE_NAME " 已匹配");
     }
 
     if (cw_wait_soc_ready() != 0) {
@@ -245,4 +288,18 @@ int bsp_battery_mv(void) {
     if (cw_read(CW_REG_VCELL_H, b, 2) != 0) return -1;
     uint32_t raw = ((uint32_t)b[0] << 8 | b[1]) & 0x3FFF;   // 14bit
     return (int)((raw * 3125) / 10000);                     // raw * 312.5uV → mV
+}
+
+
+void bsp_battery_report(void) {
+    uint8_t version=0, config=0, alert=0;
+    esp_err_t version_err=cw_read(CW_REG_VERSION,&version,1);
+    esp_err_t config_err=cw_read(CW_REG_CONFIG,&config,1);
+    esp_err_t alert_err=cw_read(CW_REG_SOC_ALERT,&alert,1);
+    bool profile_matches=false;
+    int profile_result=cw_profile_matches(&profile_matches, false);
+    printf("@PVM1 BATTERY version=%02x(%d) config=%02x(%d) alert=%02x(%d) mv=%d soc=%d accepted=%d profile_match=%d profile_read=%d\n",
+           version,version_err,config,config_err,alert,alert_err,
+           bsp_battery_mv(),bsp_battery_soc(),bsp_battery_existing_soc(),profile_matches,profile_result);
+    fflush(stdout);
 }

@@ -11,3 +11,7 @@ idf_component_register(
     REQUIRES driver esp_driver_i2c esp_driver_i2s esp_lcd esp_lvgl_port button esp_adc esp_codec_dev
     PRIV_REQUIRES esp_timer
 )
+
+if(SMART_MIC_YOUTELI_BATTERY)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SMART_MIC_YOUTELI_BATTERY)
+endif()

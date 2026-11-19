@@ -368,6 +368,7 @@ static void usb_config_task(void *arg) {
             if(!discard) {
                 configure(line); update_host(line); check_ssid(line,false); check_ssid(line,true);
                 if(!strcmp(line,"@PVM1 STATUS")) report_status();
+                else if(!strcmp(line,"@PVM1 BATTERY")) bsp_battery_report();
             }
             memset(line,0,sizeof(line)); used=0; discard=false;
         } else if(used<sizeof(line)-1 && !discard) line[used++]=(char)c;
@@ -547,8 +548,16 @@ void app_main(void) {
     if(!flags || !audio_queue || !keys) { screen_status("启动失败","设备内存不足"); return; }
     if(bsp_audio_init()!=ESP_OK) { screen_status("麦克风异常","收音模块启动失败"); return; }
     if(bsp_button_init(key_callback,NULL)!=ESP_OK) { screen_status("按键异常","按键模块启动失败"); return; }
-    // Do not write the upstream battery profile on an unverified hardware revision.
-    // Battery percentage remains unknown until its profile is explicitly validated.
+#ifdef SMART_MIC_YOUTELI_BATTERY
+    // Opt-in for boards confirmed for the factory Youteli profile.
+    bool battery_present=bsp_battery_wake_existing()==ESP_OK;
+    if(battery_present) {
+        esp_err_t battery_init=bsp_battery_init();
+        ESP_LOGI(TAG,"battery initialization: %s",esp_err_to_name(battery_init));
+    }
+#else
+    bool battery_present=bsp_battery_wake_existing()==ESP_OK;
+#endif
     ESP_ERROR_CHECK(esp_netif_init()); ESP_ERROR_CHECK(esp_event_loop_create_default());
     if(!esp_netif_create_default_wifi_sta()) return;
     wifi_init_config_t init=WIFI_INIT_CONFIG_DEFAULT(); ESP_ERROR_CHECK(esp_wifi_init(&init));
@@ -576,11 +585,24 @@ void app_main(void) {
             ESP_ERROR_CHECK(esp_wifi_start()); xEventGroupSetBits(flags,CONFIGURED);
         }
     }
+    int64_t next_battery_read=0;
+    int battery_soc=-1, displayed_soc=-1;
     int64_t last_report=0;
     int displayed_seconds=0;
     while(true) {
         atomic_fetch_add(&ui_loops,1);
+        int64_t now=esp_timer_get_time();
+        if(now>=next_battery_read && !atomic_load(&capturing)) {
+            if(!battery_present) battery_present=bsp_battery_wake_existing()==ESP_OK;
+            battery_soc=battery_present?bsp_battery_existing_soc():-1;
+            next_battery_read=now+10000000;
+        }
         if(bsp_lvgl_lock(50)) {
+            if(battery_soc!=displayed_soc) {
+                if(battery_soc>=0) lv_label_set_text_fmt(battery_label,"%d%%",battery_soc);
+                else lv_label_set_text(battery_label,"--%");
+                displayed_soc=battery_soc;
+            }
             bool recording=atomic_load(&capturing);
             update_wave(recording,atomic_load(&meter));
             int seconds=recording?(int)((xTaskGetTickCount()-atomic_load(&capture_started))/configTICK_RATE_HZ):0;
