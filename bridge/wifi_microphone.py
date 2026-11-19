@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 from codex_push import DEFAULT_SOCKET
 from chat_binding import BindingError
 from sogou_chat import LiveDictation, SogouChat
+from reply_audio import stream_reply
 import secrets
 import ipaddress
 
@@ -86,6 +87,8 @@ class MicrophoneBridge:
                     self.writer.close(); old.cancel()
                     await asyncio.gather(old,return_exceptions=True)
                 self.owner=current; self.writer=writer
+            menu_bitmap = False
+            include_project = False
             menu = self.menu_factory() if self.menu_factory else None
             writer.write(down.encode(READY,b'virtual-mic-menu' if menu else b'virtual-mic')); await writer.drain()
             print('设备已连接虚拟麦克风。按右侧最下面第三键唤起搜狗并开始收音。',flush=True)
@@ -94,23 +97,42 @@ class MicrophoneBridge:
                 kind,payload=await receive(reader,up,timeout)
                 if kind==BIND and not active and menu:
                     try:
-                        if payload == b'open':
+                        if payload == b'reply-audio':
+                            print('设备已协商 Codex 回复朗读。', flush=True)
+                            result = b'yes'
+                        elif payload in (b'open', b'open2', b'open3'):
                             await asyncio.wait_for(menu.refresh(), 18)
-                            result = menu.entry(0)
+                            menu_bitmap = payload != b'open'
+                            include_project = payload == b'open3'
+                            result = (menu.entry(0, bitmap=True, include_project=include_project)
+                                      if menu_bitmap else menu.entry(0))
                         elif len(payload)==2 and payload[0]==0:
-                            result = menu.entry(payload[1])
+                            result = (menu.entry(payload[1], bitmap=True, include_project=include_project)
+                                      if menu_bitmap else menu.entry(payload[1]))
                         elif len(payload)==2 and payload[0]==1:
                             await asyncio.wait_for(menu.select(payload[1]), 18)
                             result = b'bound'
+                        elif len(payload)==2 and payload[0]==2 and menu_bitmap:
+                            await asyncio.wait_for(menu.hide(payload[1]), 18)
+                            result = menu.entry(0, bitmap=True, include_project=include_project)
                         else:
                             result = b'error'
                     except (BindingError, RuntimeError, OSError):
                         result = b'error'
-                    writer.write(down.encode(RESULT,result)); await writer.drain()
+                    if ((result.startswith(b'Q') and len(result) == 1803)
+                            or (result.startswith(b'P') and len(result) == 2303)):
+                        writer.write(down.encode(RESULT, result[:903]))
+                        writer.write(down.encode(RESULT, result[903:1803]))
+                        if result.startswith(b'P'):
+                            writer.write(down.encode(RESULT, result[1803:]))
+                    else:
+                        writer.write(down.encode(RESULT,result))
+                    await writer.drain()
                 elif kind==START:
                     audio_format = json.loads(payload)
                     selected = audio_format.pop('selected', False) if isinstance(audio_format,dict) else False
-                    if active or audio_format!={'rate':RATE,'bits':16,'channels':1} or type(selected) is not bool:
+                    speech = audio_format.pop('replyAudio', False) if isinstance(audio_format, dict) else False
+                    if active or type(speech) is not bool or audio_format!={'rate':RATE,'bits':16,'channels':1} or type(selected) is not bool:
                         raise ValueError('invalid start')
                     session=self.chat_factory() if self.chat_factory else None
                     if selected:
@@ -119,6 +141,8 @@ class MicrophoneBridge:
                         session.use_clipboard = False
                         session.binding_path = MENU_BINDING
                     if session:
+                        if speech:
+                            session.enable_reply_audio()
                         live=LiveDictation(self.sink,session)
                     else:
                         if self.start_voice:
@@ -141,9 +165,16 @@ class MicrophoneBridge:
                                 result=b'cancelled'
                             else:
                                 result=await live.finish(lambda: self.owner is current and not reader.at_eof() and not writer.is_closing())
+                            if speech and result == b'sent':
+                                print('已收到发送回执，等待本轮最终回复。', flush=True)
+                                writer.write(down.encode(RESULT, b'sent-voice'))
+                                await writer.drain()
+                                await stream_reply(session, reader, writer, down)
+                                continue
                         finally:
+                            active = False
                             await live.close()
-                            live=None
+                            live = None
                     else:
                         await asyncio.to_thread(self.sink.finish,generation)
                     active=False

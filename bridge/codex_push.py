@@ -16,8 +16,9 @@ class CodexPush:
         self.reader = None
         self.pending = {}
         self.sequence = 0
+        self.on_notification = None
 
-    async def connect(self, verify=True):
+    async def connect(self, verify=True, *, experimental=False):
         if not self.socket.exists() or not stat.S_ISSOCK(self.socket.stat().st_mode):
             raise RuntimeError('当前聊天的共享控制接口未开放：' + str(self.socket)
                                + '；不能实时推送，未启动新会话，也不会改用定时检查。')
@@ -25,7 +26,10 @@ class CodexPush:
                                      max_size=64*1024*1024, ping_interval=None)
         self.reader = asyncio.create_task(self._read())
         try:
-            await self.request('initialize', {'clientInfo': {'name':'microbit_voice', 'version':'0.1.0'}})
+            params = {'clientInfo': {'name': 'microbit_voice', 'version': '0.1.0'}}
+            if experimental:
+                params['capabilities'] = {'experimentalApi': True}
+            await self.request('initialize', params)
             await self._send({'method':'initialized', 'params':{}})
             if verify:
                 await self.verify_target()
@@ -44,6 +48,8 @@ class CodexPush:
                     if 'id' in value:
                         # Never approve or reject on behalf of the desktop user.
                         print('Codex 请求人工审批或工具输入；语音端不代答，请查看桌面聊天。', flush=True)
+                    elif self.on_notification is not None:
+                        self.on_notification(value['method'], value.get('params') or {})
                     continue
                 future = self.pending.get(value.get('id'))
                 if future is not None and not future.done():

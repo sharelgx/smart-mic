@@ -8,6 +8,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bridge'))
+from chat_menu import ChatMenu, text_bitmap
 from wifi_microphone import MicrophoneBridge
 from wifi_protocol import AUDIO, BIND, CANCEL, END, Frames, RATE, READY, RESULT, START, receive, session_keys
 
@@ -93,11 +94,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         sessions = [Session(), Session()]
         selected = None
 
-        class Menu:
+        class Menu(ChatMenu):
             async def refresh(self):
-                pass
+                self.entries = [('a', '数学课堂', '整理练习'), ('b', '编程课堂', '检查作业')]
 
-            def entry(self, index):
+            def entry(self, index, bitmap=False, *, include_project=False):
+                if bitmap:
+                    return super().entry(index, bitmap, include_project=include_project)
                 return (b'1/2\nProject A', b'2/2\nProject B')[index]
 
             async def select(self, index):
@@ -114,6 +117,15 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 writer.write(nonce + hmac.digest(key, challenge + nonce, 'sha256'))
                 up, down = [Frames(k) for k in session_keys(key, challenge[4:], nonce)]
                 self.assertEqual(await receive(reader, down, 2), (READY, b'virtual-mic-menu'))
+                for request, index, project in ((b'open3', 0, '数学课堂'),
+                                                (bytes([0, 1]), 1, '编程课堂')):
+                    writer.write(up.encode(BIND, request))
+                    first, second, third = [await receive(reader, down, 2) for _ in range(3)]
+                    self.assertEqual([frame[0] for frame in (first, second, third)], [RESULT] * 3)
+                    self.assertEqual(first[1][:3], b'P' + bytes([index, 2]))
+                    self.assertEqual((len(first[1]), len(second[1])), (903, 900))
+                    self.assertEqual(third[1], text_bitmap(f'项目：{project}', size=16, row_height=20, rows=1))
+                    self.assertTrue(any(third[1]))
                 pcm = b'\x01\0' * 320
                 for index in range(2):
                     writer.write(up.encode(BIND, b'open'))

@@ -7,6 +7,7 @@ import sys
 from chat_binding import (BINDING_FILE, BindingError, invalidate_binding, bind_target,
                           copied_thread_id, verify_bound_target)
 from codex_push import CodexPush
+from reply_audio import TurnReplies
 from speech_text import simplify
 from wifi_protocol import RATE
 
@@ -18,6 +19,8 @@ class SogouChat:
         self.client = CodexPush('', ROOT)
         self.use_clipboard = True
         self.binding_path = None
+        self.replies = None
+        self.reply_turn = None
         self.pad = None
         self.voice_pids = None
         self.starting_voice = None
@@ -82,8 +85,23 @@ class SogouChat:
 
     async def send(self, text):
         self.stage = '等待当前聊天的发送回执'
-        return await self.client.push(
+        if self.replies is not None:
+            self.client.on_notification = self.replies.observe
+        self.reply_turn = await self.client.push(
             text, before_submit=lambda: verify_bound_target(self.client, path=self.binding_path or BINDING_FILE))
+
+        return self.reply_turn
+
+    def enable_reply_audio(self):
+        self.replies = TurnReplies(self.client)
+
+    def verify_reply_target(self):
+        verify_bound_target(self.client, path=self.binding_path or BINDING_FILE)
+
+    async def reply_text(self):
+        reply = await self.replies.wait(self.reply_turn)
+        self.verify_reply_target()
+        return reply
 
     async def close(self):
         try:

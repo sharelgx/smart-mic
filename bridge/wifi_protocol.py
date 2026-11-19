@@ -8,7 +8,7 @@ import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MAGIC = b'PVM1'
-START, AUDIO, END, CANCEL, RESULT, READY, BIND = range(1, 8)
+START, AUDIO, END, CANCEL, RESULT, READY, BIND, SPEECH, SPEECH_END = range(1, 10)
 MAX_FRAME = 4096
 RATE = 16000
 MAX_SECONDS = 60

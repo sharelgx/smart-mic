@@ -173,6 +173,9 @@ async def bind_target(client, candidate, path=BINDING_FILE):
             raise BindingError('核对时聊天绑定已变化，请重新开始听写')
         if binding != previous:
             version = save_binding(path, binding)
+        journal = thread.get('path')
+        if isinstance(journal, str) and Path(journal).is_absolute() and Path(journal).suffix == '.jsonl':
+            client.reply_journal = Path(journal)
         client.thread = thread_id
         client.cwd = Path(binding['cwd'])
         client.binding_version = version
